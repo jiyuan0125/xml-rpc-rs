@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use super::error::{Error, Result};
 use super::Value;
 use serde::de::{

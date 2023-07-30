@@ -1,4 +1,4 @@
-#![allow(unknown_lints, unused_doc_comments)]
+#![allow(unknown_lints, unused_doc_comments, deprecated, bare_trait_objects)]
 use serde::{de, ser};
 use std::fmt::{self, Display};
 

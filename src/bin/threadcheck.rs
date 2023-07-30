@@ -19,7 +19,7 @@ fn main() {
             println!("bar end");
             Ok(())
         });
-        let bound_server = server
+        let mut bound_server = server
             .bind(&SocketAddr::new(
                 IpAddr::V4("127.0.0.1".parse().unwrap()),
                 5000,

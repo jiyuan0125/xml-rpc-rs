@@ -29,7 +29,7 @@ pub fn main() {
     thread::spawn(move || {
         let bound_server = server.bind(&socket).unwrap();
         let socket = bound_server.local_addr();
-        println!("{}", socket);
+        println!("{:?}", socket);
         bound_server.run()
     });
     let mut client = Client::new().unwrap();

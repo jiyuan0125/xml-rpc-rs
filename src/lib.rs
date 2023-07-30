@@ -15,13 +15,13 @@ extern crate serde;
 extern crate serde_bytes;
 #[macro_use]
 extern crate serde_derive;
-pub extern crate rouille;
 extern crate serde_xml_rs;
 extern crate xml;
 
 pub mod client;
 pub mod error;
 pub mod server;
+pub mod http;
 mod xmlfmt;
 
 pub use client::{call, call_value, Client};

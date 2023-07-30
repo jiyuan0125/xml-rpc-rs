@@ -1,12 +1,18 @@
-use rouille;
+#![allow(deprecated)]
 use serde::{Deserialize, Serialize};
 use std;
 use std::collections::HashMap;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
+
+use crate::http::create_request;
 
 use super::error::{ErrorKind, Result};
 use super::xmlfmt::{error, from_params, into_params, parse, Call, Fault, Response, Value};
 
-type Handler = Box<Fn(Vec<Value>) -> Response + Send + Sync>;
+use super::http::{Request as HttpRequest, Response as HttpResponse};
+
+type Handler = Box<dyn Fn(Vec<Value>) -> Response + Send + Sync>;
 type HandlerMap = HashMap<String, Handler>;
 
 pub fn on_decode_fail(err: &error::Error) -> Response {
@@ -98,29 +104,30 @@ impl Server {
     pub fn bind(
         self,
         uri: &std::net::SocketAddr,
-    ) -> Result<BoundServer<impl Fn(&rouille::Request) -> rouille::Response + Send + Sync + 'static>>
-    {
-        rouille::Server::new(uri, move |req| self.handle_outer(req))
-            .map_err(|err| ErrorKind::BindFail(err.description().into()).into())
-            .map(BoundServer::new)
+    ) -> Result<BoundServer<impl Fn(&HttpRequest) -> HttpResponse + Send + Sync + 'static>> {
+        let tcp_listener =
+            TcpListener::bind(uri).map_err(|err| ErrorKind::BindFail(err.to_string().into()))?;
+        Ok(BoundServer::new(tcp_listener, move |request| {
+            self.handle_outer(request)
+        }))
     }
 
-    fn handle_outer(&self, request: &rouille::Request) -> rouille::Response {
+    fn handle_outer(&self, request: &HttpRequest) -> HttpResponse {
         use super::xmlfmt::value::ToXml;
 
-        let body = match request.data() {
+        let body = match request.body() {
             Some(data) => data,
-            None => return rouille::Response::empty_400(),
+            None => return HttpResponse::empty_400(),
         };
 
         // TODO: use the right error type
-        let call: Call = match parse::call(body) {
+        let call: Call = match parse::call(body.as_bytes()) {
             Ok(data) => data,
-            Err(_err) => return rouille::Response::empty_400(),
+            Err(_err) => return HttpResponse::empty_400(),
         };
         let res = self.handle(call);
         let body = res.to_xml();
-        rouille::Response::from_data("text/xml", body)
+        HttpResponse::from_data("text/xml", Some(body))
     }
 
     fn handle(&self, req: Call) -> Response {
@@ -132,29 +139,75 @@ impl Server {
 
 pub struct BoundServer<F>
 where
-    F: Send + Sync + 'static + Fn(&rouille::Request) -> rouille::Response,
+    F: Send + Sync + 'static + Fn(&HttpRequest) -> HttpResponse,
 {
-    server: rouille::Server<F>,
-    // server: hyper::Server<NewService, hyper::Body>,
+    tcp_listener: Arc<Mutex<Option<TcpListener>>>,
+    handler: Arc<F>,
 }
 
 impl<F> BoundServer<F>
 where
-    F: Send + Sync + 'static + Fn(&rouille::Request) -> rouille::Response,
+    F: Send + Sync + 'static + Fn(&HttpRequest) -> HttpResponse,
 {
-    fn new(server: rouille::Server<F>) -> Self {
-        Self { server }
+    fn new(tcp_listener: TcpListener, handler: F) -> Self {
+        Self {
+            tcp_listener: Arc::new(Mutex::new(Some(tcp_listener))),
+            handler: Arc::new(handler),
+        }
     }
 
-    pub fn local_addr(&self) -> std::net::SocketAddr {
-        self.server.server_addr()
+    pub fn local_addr(&self) -> Option<std::net::SocketAddr> {
+        self.tcp_listener
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|v| v.local_addr().ok())
     }
 
-    pub fn run(self) {
-        self.server.run()
+    pub fn run(&self) {
+        let tcp_listener = self.tcp_listener.lock().unwrap().take().unwrap();
+        accept_loop_tcp(tcp_listener, self.handler.clone());
     }
+}
 
-    pub fn poll(&self) {
-        self.server.poll()
+fn accept_loop_tcp<F>(tcp_listener: TcpListener, handler: Arc<F>)
+where
+    F: Send + Sync + 'static + Fn(&HttpRequest) -> HttpResponse,
+{
+    loop {
+        let handler = handler.clone();
+        let accept = tcp_listener.accept();
+        match accept {
+            Ok((stream, remote_addr)) => {
+                println!("a connection accepted: {}", remote_addr);
+                std::thread::spawn(move || {
+                    handle_connection(stream, &remote_addr, handler.clone());
+                });
+            }
+            Err(e) => eprintln!("failed to accept connection: {}", e),
+        }
+    }
+}
+
+fn handle_connection<F>(mut stream: TcpStream, remote_addr: &SocketAddr, handler: Arc<F>)
+where
+    F: Send + Sync + 'static + Fn(&HttpRequest) -> HttpResponse,
+{
+    loop {
+        let request = create_request(&mut stream, &remote_addr);
+        match request {
+            Ok(request) => {
+                println!("request: {:?}", request);
+                let response = handler(&request);
+                if let Err(e) = response.raw_print(&mut stream, false) {
+                    println!("failed to send response: {}", e);
+                }
+            }
+            Err(e) => {
+                eprintln!("failed parse request: {}", e);
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                break;
+            }
+        }
     }
 }
