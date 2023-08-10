@@ -203,9 +203,9 @@ where
                     println!("failed to send response: {}", e);
                 }
             }
-            Err(e) => {
-                eprintln!("failed parse request: {}", e);
-                let _ = stream.shutdown(std::net::Shutdown::Both);
+            Err(_) => {
+                // eprintln!("failed parse request: {}", e);
+                // let _ = stream.shutdown(std::net::Shutdown::Both);
                 break;
             }
         }
