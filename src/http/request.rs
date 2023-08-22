@@ -225,13 +225,13 @@ fn parse_http_version(version: &str) -> IoResult<HTTPVersion> {
     Ok(HTTPVersion(major, minor))
 }
 
-pub fn create_request(stream: &mut TcpStream, remote_addr: &SocketAddr) -> IoResult<Request> {
+pub fn create_request<R: Read>(reader: &mut R, remote_addr: &SocketAddr) -> IoResult<Request> {
     let mut headers = Vec::new();
     let mut body = None;
     let mut body_length = None;
     let remote_addr = Some(*remote_addr);
 
-    let line = read_next_line(stream)?;
+    let line = read_next_line(reader)?;
     let mut parts = line.split_whitespace();
 
     let method = match parts.next() {
@@ -250,7 +250,7 @@ pub fn create_request(stream: &mut TcpStream, remote_addr: &SocketAddr) -> IoRes
     };
 
     loop {
-        let line = read_next_line(stream)?;
+        let line = read_next_line(reader)?;
         if line.is_empty() {
             break;
         }
@@ -270,7 +270,7 @@ pub fn create_request(stream: &mut TcpStream, remote_addr: &SocketAddr) -> IoRes
     let body_length = body_length.unwrap_or(0);
     if body_length > 0 {
         let mut buf = vec![0; body_length];
-        stream.read_exact(&mut buf)?;
+        reader.read_exact(&mut buf)?;
         body = Some(
             String::from_utf8(buf)
                 .map_err(|_| IoError::new(ErrorKind::InvalidData, "body is not in UTF-8"))?,

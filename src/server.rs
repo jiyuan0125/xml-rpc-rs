@@ -1,8 +1,8 @@
 #![allow(deprecated)]
 use serde::{Deserialize, Serialize};
-use std;
 use std::collections::HashMap;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::io::Cursor;
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 
 use crate::http::create_request;
@@ -107,7 +107,10 @@ impl Server {
     ) -> Result<BoundServer<impl Fn(&HttpRequest) -> HttpResponse + Send + Sync + 'static>> {
         let tcp_listener =
             TcpListener::bind(uri).map_err(|err| ErrorKind::BindFail(err.to_string().into()))?;
-        Ok(BoundServer::new(tcp_listener, move |request| {
+        let udp_socket =
+            UdpSocket::bind(uri).map_err(|err| ErrorKind::BindFail(err.to_string().into()))?;
+
+        Ok(BoundServer::new(tcp_listener, udp_socket, move |request| {
             self.handle_outer(request)
         }))
     }
@@ -142,6 +145,7 @@ where
     F: Send + Sync + 'static + Fn(&HttpRequest) -> HttpResponse,
 {
     tcp_listener: Arc<Mutex<Option<TcpListener>>>,
+    udp_socket: Arc<Mutex<Option<UdpSocket>>>,
     handler: Arc<F>,
 }
 
@@ -149,9 +153,10 @@ impl<F> BoundServer<F>
 where
     F: Send + Sync + 'static + Fn(&HttpRequest) -> HttpResponse,
 {
-    fn new(tcp_listener: TcpListener, handler: F) -> Self {
+    fn new(tcp_listener: TcpListener, udp_socket: UdpSocket, handler: F) -> Self {
         Self {
             tcp_listener: Arc::new(Mutex::new(Some(tcp_listener))),
+            udp_socket: Arc::new(Mutex::new(Some(udp_socket))),
             handler: Arc::new(handler),
         }
     }
@@ -167,6 +172,9 @@ where
     pub fn run(&self) {
         let tcp_listener = self.tcp_listener.lock().unwrap().take().unwrap();
         accept_loop_tcp(tcp_listener, self.handler.clone());
+
+        let udp_socket = self.udp_socket.lock().unwrap().take().unwrap();
+        accept_loop_udp(udp_socket, self.handler.clone());
     }
 }
 
@@ -183,6 +191,24 @@ where
                 std::thread::spawn(move || {
                     handle_connection(stream, &remote_addr, handler.clone());
                 });
+            }
+            Err(e) => eprintln!("failed to accept connection: {}", e),
+        }
+    }
+}
+
+fn accept_loop_udp<F>(udp_socket: UdpSocket, handler: Arc<F>)
+where
+    F: Send + Sync + 'static + Fn(&HttpRequest) -> HttpResponse,
+{
+    loop {
+        let handler = handler.clone();
+        let mut buf = vec![0; 4096];
+        let received = udp_socket.recv_from(&mut buf);
+        match received {
+            Ok((_amt, remote_addr)) => {
+                println!("received from: {}", remote_addr);
+                handle_udp_message(&udp_socket, buf, &remote_addr, handler.clone());
             }
             Err(e) => eprintln!("failed to accept connection: {}", e),
         }
@@ -208,6 +234,31 @@ where
                 // let _ = stream.shutdown(std::net::Shutdown::Both);
                 break;
             }
+        }
+    }
+}
+
+fn handle_udp_message<F>(udp_socket: &UdpSocket, buf: Vec<u8>, remote_addr: &SocketAddr, handler: Arc<F>)
+where
+    F: Send + Sync + 'static + Fn(&HttpRequest) -> HttpResponse,
+{
+    let mut reader = Cursor::new(buf);
+    let request = create_request(&mut reader, &remote_addr);
+    match request {
+        Ok(request) => {
+            println!("request: {:?}", request);
+            let response = handler(&request);
+            let mut writer = Cursor::new(vec![0; 4096]);
+            if let Err(e) = response.raw_print(&mut writer, false) {
+                println!("failed to write response: {}", e);
+            }
+            if let Err(e) = udp_socket.send(&writer.into_inner()) {
+                eprintln!("failed to send response: {}", e);
+            }
+        }
+        Err(_) => {
+            // eprintln!("failed parse request: {}", e);
+            // let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     }
 }
